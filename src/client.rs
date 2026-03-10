@@ -113,6 +113,14 @@ impl JobcelisClient {
     // -------------------------------------------------------------------------
 
     /// Create a webhook.
+    ///
+    /// Optional fields via `extra`: `topics`, `secret`, `headers`, `rate_limit`.
+    /// The `rate_limit` object accepts `max_per_second` and/or `max_per_minute`:
+    /// ```ignore
+    /// client.create_webhook("https://example.com/hook", Some(json!({
+    ///     "rate_limit": { "max_per_second": 10, "max_per_minute": 100 }
+    /// }))).await?;
+    /// ```
     pub async fn create_webhook(&self, url: &str, extra: Option<Value>) -> Result<Value, JobcelisError> {
         let mut body = json!({"url": url});
         if let Some(e) = extra {
@@ -136,6 +144,14 @@ impl JobcelisClient {
     }
 
     /// Update a webhook.
+    ///
+    /// The `data` object can include `url`, `topics`, `secret`, `headers`, `rate_limit`.
+    /// The `rate_limit` object accepts `max_per_second` and/or `max_per_minute`:
+    /// ```ignore
+    /// client.update_webhook("wh_123", json!({
+    ///     "rate_limit": { "max_per_second": 5, "max_per_minute": 60 }
+    /// })).await?;
+    /// ```
     pub async fn update_webhook(&self, webhook_id: &str, data: Value) -> Result<Value, JobcelisError> {
         self.patch(&format!("/api/v1/webhooks/{webhook_id}"), data).await
     }
@@ -153,6 +169,11 @@ impl JobcelisClient {
     /// List available webhook templates.
     pub async fn webhook_templates(&self) -> Result<Value, JobcelisError> {
         self.get("/api/v1/webhooks/templates", &[]).await
+    }
+
+    /// Send a test delivery to a webhook.
+    pub async fn test_webhook(&self, webhook_id: &str) -> Result<Value, JobcelisError> {
+        self.post(&format!("/api/v1/webhooks/{webhook_id}/test"), json!({})).await
     }
 
     // -------------------------------------------------------------------------
@@ -579,6 +600,73 @@ impl JobcelisClient {
     }
 
     // -------------------------------------------------------------------------
+    // Embed Tokens
+    // -------------------------------------------------------------------------
+
+    /// List embed tokens.
+    pub async fn list_embed_tokens(&self) -> Result<Value, JobcelisError> {
+        self.get("/api/v1/embed/tokens", &[]).await
+    }
+
+    /// Create an embed token.
+    pub async fn create_embed_token(&self, config: Value) -> Result<Value, JobcelisError> {
+        self.post("/api/v1/embed/tokens", config).await
+    }
+
+    /// Revoke an embed token.
+    pub async fn revoke_embed_token(&self, id: &str) -> Result<(), JobcelisError> {
+        self.do_delete(&format!("/api/v1/embed/tokens/{id}")).await
+    }
+
+    // -------------------------------------------------------------------------
+    // Notification Channels
+    // -------------------------------------------------------------------------
+
+    /// Get the notification channel configuration.
+    pub async fn get_notification_channel(&self) -> Result<Value, JobcelisError> {
+        self.get("/api/v1/notification-channels", &[]).await
+    }
+
+    /// Create or update the notification channel configuration.
+    pub async fn upsert_notification_channel(&self, config: Value) -> Result<Value, JobcelisError> {
+        self.put("/api/v1/notification-channels", config).await
+    }
+
+    /// Delete the notification channel configuration.
+    pub async fn delete_notification_channel(&self) -> Result<(), JobcelisError> {
+        self.do_delete("/api/v1/notification-channels").await
+    }
+
+    /// Send a test notification to the configured channel.
+    pub async fn test_notification_channel(&self) -> Result<Value, JobcelisError> {
+        self.post("/api/v1/notification-channels/test", json!({})).await
+    }
+
+    // -------------------------------------------------------------------------
+    // Retention & Purge
+    // -------------------------------------------------------------------------
+
+    /// Get current retention policy.
+    pub async fn get_retention_policy(&self) -> Result<Value, JobcelisError> {
+        self.get("/api/v1/retention", &[]).await
+    }
+
+    /// Update retention policy.
+    pub async fn update_retention_policy(&self, policy: Value) -> Result<Value, JobcelisError> {
+        self.patch("/api/v1/retention", policy).await
+    }
+
+    /// Preview a purge operation.
+    pub async fn preview_purge(&self, params: Value) -> Result<Value, JobcelisError> {
+        self.post("/api/v1/purge/preview", params).await
+    }
+
+    /// Execute a purge operation.
+    pub async fn purge_data(&self, params: Value) -> Result<Value, JobcelisError> {
+        self.post("/api/v1/purge", params).await
+    }
+
+    // -------------------------------------------------------------------------
     // Health
     // -------------------------------------------------------------------------
 
@@ -602,6 +690,10 @@ impl JobcelisClient {
 
     async fn post(&self, path: &str, body: Value) -> Result<Value, JobcelisError> {
         self.request(Method::POST, path, &[], Some(body)).await
+    }
+
+    async fn put(&self, path: &str, body: Value) -> Result<Value, JobcelisError> {
+        self.request(Method::PUT, path, &[], Some(body)).await
     }
 
     async fn patch(&self, path: &str, body: Value) -> Result<Value, JobcelisError> {
