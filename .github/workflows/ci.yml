@@ -1,0 +1,24 @@
+# Builds and checks every pull request (Dependabot's too) the same way Release
+# does before publishing, so a change that would break the release fails here.
+name: CI
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Test
+        run: cargo test
+
+      - name: Package like crates.io would
+        run: cargo publish --dry-run
