@@ -332,3 +332,7 @@ if verify_webhook_signature("your_webhook_secret", body, signature) {
 ## License
 
 BSL-1.1 (Business Source License)
+
+## Releasing
+
+Bump the version in `Cargo.toml` and merge to `main`. The [Release workflow](.github/workflows/release.yml) publishes it to crates.io and tags the commit. Changes that do not bump the version publish nothing.
