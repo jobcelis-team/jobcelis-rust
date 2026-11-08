@@ -70,6 +70,9 @@ let result = client.verify_mfa(access_token, "123456").await?;
 // Send a single event
 let event = client.send_event("order.created", json!({"order_id": "123", "amount": 99.99})).await?;
 
+// Send a single event with your own idempotency key
+let event = client.send_event_with_idempotency_key("order.created", json!({"order_id": "123"}), "order-123-created").await?;
+
 // Send batch events (up to 1000)
 let batch = client.send_events(vec![
     json!({"topic": "order.created", "payload": {"order_id": "1"}}),
@@ -313,6 +316,22 @@ match client.get_event("nonexistent").await {
     Err(e) => println!("Error: {e}"),
 }
 ```
+
+## Retries
+
+The client retries failed requests automatically, so a short outage (for example while the API is being deployed) does not lose your events:
+
+- **What is retried:** network errors (connection refused or reset, DNS, TLS, timeouts) and HTTP `429`, `502`, `503` and `504`. Other errors (`400`, `401`, `404`, `422`, `500`, ...) are returned right away.
+- **POST requests** are retried on `429`/`502`/`503`/`504`, but after a network error only when they carry an idempotency key, because the server may already have processed them.
+- **Events are safe to retry:** `send_event` sends a random `X-Idempotency-Key` header (or yours, with `send_event_with_idempotency_key`) that stays the same on every retry, and `send_events` gives every event without an `idempotency_key` a random one. A retried call never creates an event twice.
+- **Backoff:** 1s, 2s, 4s, 8s, 16s, then 30s (±20% jitter), or the server's `Retry-After` header (up to 60s). The default of 6 retries covers about 60 seconds.
+
+```rust
+let client = JobcelisClient::new("your_api_key").with_max_retries(3); // fewer retries
+let client = JobcelisClient::new("your_api_key").with_max_retries(0); // no retries
+```
+
+When the last retry fails, the error is the same one a single attempt returns (`JobcelisError::Api` or `JobcelisError::Request`). Retries wait with `tokio::time::sleep`, so the client needs a Tokio runtime with the time driver enabled (`#[tokio::main]` enables it).
 
 ## Webhook Signature Verification
 
