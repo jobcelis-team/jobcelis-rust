@@ -19,8 +19,13 @@
 
 mod client;
 mod error;
+mod retry;
 mod webhook;
+
+#[cfg(test)]
+mod retry_tests;
 
 pub use client::JobcelisClient;
 pub use error::JobcelisError;
+pub use retry::DEFAULT_MAX_RETRIES;
 pub use webhook::verify_webhook_signature;

@@ -1,16 +1,28 @@
-use reqwest::{Client, Method, Response};
+use std::time::Duration;
+
+use reqwest::{Client, Method, RequestBuilder};
 use serde_json::{json, Value};
 
 use crate::error::JobcelisError;
+use crate::retry::{
+    backoff_delay, is_retryable_status, new_idempotency_key, parse_retry_after,
+    DEFAULT_MAX_RETRIES, DEFAULT_RETRY_BASE_DELAY, IDEMPOTENCY_KEY_HEADER,
+};
 
 /// Client for the Jobcelis Event Infrastructure Platform API.
 ///
 /// All API calls go to `https://jobcelis.com` by default.
+///
+/// Failed requests (network errors and HTTP 429, 502, 503, 504) are retried
+/// automatically, up to 6 times by default; see
+/// [`with_max_retries`](Self::with_max_retries).
 pub struct JobcelisClient {
     http: Client,
     api_key: String,
     base_url: String,
     auth_token: Option<String>,
+    max_retries: u32,
+    retry_base_delay: Duration,
 }
 
 impl JobcelisClient {
@@ -22,6 +34,8 @@ impl JobcelisClient {
             api_key: api_key.to_string(),
             base_url: "https://jobcelis.com".to_string(),
             auth_token: None,
+            max_retries: DEFAULT_MAX_RETRIES,
+            retry_base_delay: DEFAULT_RETRY_BASE_DELAY,
         }
     }
 
@@ -32,7 +46,25 @@ impl JobcelisClient {
             api_key: api_key.to_string(),
             base_url: base_url.trim_end_matches('/').to_string(),
             auth_token: None,
+            max_retries: DEFAULT_MAX_RETRIES,
+            retry_base_delay: DEFAULT_RETRY_BASE_DELAY,
         }
+    }
+
+    /// Set how many times a failed request is retried (default 6, about 60
+    /// seconds in total). `0` disables retries.
+    ///
+    /// Network errors and HTTP 429, 502, 503 and 504 are retried with
+    /// exponential backoff (1s doubling up to 30s, +/-20% jitter), or after
+    /// the `Retry-After` the server sends (up to 60s). POST requests are
+    /// retried after a network error only when they carry an idempotency key.
+    ///
+    /// ```no_run
+    /// let client = jobcelis::JobcelisClient::new("your_api_key").with_max_retries(3);
+    /// ```
+    pub fn with_max_retries(mut self, max_retries: u32) -> Self {
+        self.max_retries = max_retries;
+        self
     }
 
     /// Set JWT bearer token for authenticated requests.
@@ -73,12 +105,44 @@ impl JobcelisClient {
     // -------------------------------------------------------------------------
 
     /// Send a single event.
+    ///
+    /// The request carries a random `X-Idempotency-Key` that stays the same
+    /// on every retry, so a retried call never creates the event twice.
     pub async fn send_event(&self, topic: &str, payload: Value) -> Result<Value, JobcelisError> {
-        self.post("/api/v1/events", json!({"topic": topic, "payload": payload})).await
+        self.send_event_with_idempotency_key(topic, payload, &new_idempotency_key()).await
+    }
+
+    /// Send a single event with your own idempotency key (sent as the
+    /// `X-Idempotency-Key` header). Sending the same key again does not
+    /// create a second event.
+    pub async fn send_event_with_idempotency_key(&self, topic: &str, payload: Value, idempotency_key: &str) -> Result<Value, JobcelisError> {
+        let body = json!({"topic": topic, "payload": payload});
+        let (status, text) = self
+            .execute(true, || {
+                self.api_request(Method::POST, "/api/v1/events", &[])
+                    .header(IDEMPOTENCY_KEY_HEADER, idempotency_key)
+                    .json(&body)
+            })
+            .await?;
+        parse_response(status, text)
     }
 
     /// Send up to 1000 events in a batch.
+    ///
+    /// Every event object without an `idempotency_key` gets a random one, so
+    /// a retried call never creates an event twice.
     pub async fn send_events(&self, events: Vec<Value>) -> Result<Value, JobcelisError> {
+        let events: Vec<Value> = events
+            .into_iter()
+            .map(|mut event| {
+                if let Value::Object(ref mut map) = event {
+                    if !map.contains_key("idempotency_key") {
+                        map.insert("idempotency_key".to_string(), json!(new_idempotency_key()));
+                    }
+                }
+                event
+            })
+            .collect();
         self.post("/api/v1/events/batch", json!({"events": events})).await
     }
 
@@ -724,15 +788,17 @@ impl JobcelisClient {
 
     async fn get_raw(&self, path: &str, params: &[(&str, String)]) -> Result<String, JobcelisError> {
         let url = format!("{}{}", self.base_url, path);
-        let mut req = self.http.request(Method::GET, &url)
-            .header("x-api-key", &self.api_key)
-            .query(params);
-        if let Some(ref token) = self.auth_token {
-            req = req.header("authorization", format!("Bearer {token}"));
-        }
-        let resp = req.send().await?;
-        let status = resp.status().as_u16();
-        let body = resp.text().await?;
+        let (status, body) = self
+            .execute(true, || {
+                let mut req = self.http.request(Method::GET, &url)
+                    .header("x-api-key", &self.api_key)
+                    .query(params);
+                if let Some(ref token) = self.auth_token {
+                    req = req.header("authorization", format!("Bearer {token}"));
+                }
+                req
+            })
+            .await?;
         if status >= 400 {
             let detail = serde_json::from_str(&body).unwrap_or(json!(body));
             return Err(JobcelisError::Api { status, detail });
@@ -742,15 +808,32 @@ impl JobcelisClient {
 
     async fn public_post(&self, path: &str, body: Value) -> Result<Value, JobcelisError> {
         let url = format!("{}{}", self.base_url, path);
-        let resp = self.http.post(&url)
-            .header("content-type", "application/json")
-            .json(&body)
-            .send()
+        let (status, text) = self
+            .execute(false, || {
+                self.http.post(&url)
+                    .header("content-type", "application/json")
+                    .json(&body)
+            })
             .await?;
-        self.handle_response(resp).await
+        parse_response(status, text)
     }
 
     async fn request(&self, method: Method, path: &str, params: &[(&str, String)], body: Option<Value>) -> Result<Value, JobcelisError> {
+        let idempotent = method != Method::POST;
+        let (status, text) = self
+            .execute(idempotent, || {
+                let mut req = self.api_request(method.clone(), path, params);
+                if let Some(ref b) = body {
+                    req = req.json(b);
+                }
+                req
+            })
+            .await?;
+        parse_response(status, text)
+    }
+
+    /// A request with the JSON and API key (and bearer token) headers.
+    fn api_request(&self, method: Method, path: &str, params: &[(&str, String)]) -> RequestBuilder {
         let url = format!("{}{}", self.base_url, path);
         let mut req = self.http.request(method, &url)
             .header("content-type", "application/json")
@@ -762,24 +845,72 @@ impl JobcelisClient {
         if !params.is_empty() {
             req = req.query(params);
         }
-        if let Some(b) = body {
-            req = req.json(&b);
-        }
-        let resp = req.send().await?;
-        self.handle_response(resp).await
+        req
     }
 
-    async fn handle_response(&self, resp: Response) -> Result<Value, JobcelisError> {
-        let status = resp.status().as_u16();
-        if status == 204 {
-            return Ok(json!(null));
+    /// Sends the request built by `build` and returns the status and body,
+    /// retrying HTTP 429, 502, 503 and 504 up to `max_retries` times.
+    /// Network errors are retried only when `idempotent` is true (any method
+    /// but POST, or a POST with an idempotency key), because the server may
+    /// already have processed the request.
+    async fn execute<F>(&self, idempotent: bool, build: F) -> Result<(u16, String), JobcelisError>
+    where
+        F: Fn() -> RequestBuilder,
+    {
+        let mut attempt: u32 = 0;
+        loop {
+            let delay = match send_once(build()).await {
+                Ok((status, retry_after, body)) => {
+                    if !is_retryable_status(status) || attempt >= self.max_retries {
+                        return Ok((status, body));
+                    }
+                    retry_after
+                        .as_deref()
+                        .and_then(parse_retry_after)
+                        .unwrap_or_else(|| backoff_delay(attempt + 1, self.retry_base_delay))
+                }
+                Err(err) => {
+                    if err.is_builder() || !idempotent || attempt >= self.max_retries {
+                        return Err(err.into());
+                    }
+                    backoff_delay(attempt + 1, self.retry_base_delay)
+                }
+            };
+
+            attempt += 1;
+            tokio::time::sleep(delay).await;
         }
-        let body = resp.text().await?;
-        if status >= 400 {
-            let detail = serde_json::from_str(&body).unwrap_or(json!(body));
-            return Err(JobcelisError::Api { status, detail });
-        }
-        let parsed: Value = serde_json::from_str(&body)?;
-        Ok(parsed)
     }
+
+    #[cfg(test)]
+    pub(crate) fn with_retry_base_delay(mut self, delay: Duration) -> Self {
+        self.retry_base_delay = delay;
+        self
+    }
+}
+
+/// Makes one attempt and returns the status, the `Retry-After` header and
+/// the body.
+async fn send_once(req: RequestBuilder) -> Result<(u16, Option<String>, String), reqwest::Error> {
+    let resp = req.send().await?;
+    let status = resp.status().as_u16();
+    let retry_after = resp
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let body = resp.text().await?;
+    Ok((status, retry_after, body))
+}
+
+fn parse_response(status: u16, body: String) -> Result<Value, JobcelisError> {
+    if status == 204 {
+        return Ok(json!(null));
+    }
+    if status >= 400 {
+        let detail = serde_json::from_str(&body).unwrap_or(json!(body));
+        return Err(JobcelisError::Api { status, detail });
+    }
+    let parsed: Value = serde_json::from_str(&body)?;
+    Ok(parsed)
 }
