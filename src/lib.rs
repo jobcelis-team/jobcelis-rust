@@ -25,7 +25,7 @@ mod webhook;
 #[cfg(test)]
 mod retry_tests;
 
-pub use client::JobcelisClient;
+pub use client::{JobcelisClient, DEFAULT_CONNECT_TIMEOUT, DEFAULT_TIMEOUT};
 pub use error::JobcelisError;
 pub use retry::DEFAULT_MAX_RETRIES;
 pub use webhook::verify_webhook_signature;

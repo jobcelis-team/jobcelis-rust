@@ -25,12 +25,31 @@ pub struct JobcelisClient {
     retry_base_delay: Duration,
 }
 
+/// Default timeout for a whole request (connect, send, read the response).
+pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Default timeout for opening the connection.
+pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The HTTP client used unless you pass your own with
+/// [`JobcelisClient::with_http_client`]: 30s per request, 10s to connect.
+fn default_http_client() -> Client {
+    Client::builder()
+        .timeout(DEFAULT_TIMEOUT)
+        .connect_timeout(DEFAULT_CONNECT_TIMEOUT)
+        .build()
+        .unwrap_or_else(|_| Client::new())
+}
+
 impl JobcelisClient {
     /// Create a new client with the given API key.
     /// Connects to `https://jobcelis.com` by default.
+    ///
+    /// Requests time out after 30 seconds (10 seconds to connect); use
+    /// [`with_http_client`](Self::with_http_client) for other settings.
     pub fn new(api_key: &str) -> Self {
         Self {
-            http: Client::new(),
+            http: default_http_client(),
             api_key: api_key.to_string(),
             base_url: "https://jobcelis.com".to_string(),
             auth_token: None,
@@ -42,7 +61,7 @@ impl JobcelisClient {
     /// Create a new client with a custom base URL.
     pub fn with_base_url(api_key: &str, base_url: &str) -> Self {
         Self {
-            http: Client::new(),
+            http: default_http_client(),
             api_key: api_key.to_string(),
             base_url: base_url.trim_end_matches('/').to_string(),
             auth_token: None,
@@ -64,6 +83,21 @@ impl JobcelisClient {
     /// ```
     pub fn with_max_retries(mut self, max_retries: u32) -> Self {
         self.max_retries = max_retries;
+        self
+    }
+
+    /// Use your own `reqwest::Client` (for example with a different timeout
+    /// or a proxy) instead of the default one.
+    ///
+    /// ```no_run
+    /// let http = reqwest::Client::builder()
+    ///     .timeout(std::time::Duration::from_secs(60))
+    ///     .build()
+    ///     .unwrap();
+    /// let client = jobcelis::JobcelisClient::new("your_api_key").with_http_client(http);
+    /// ```
+    pub fn with_http_client(mut self, http: Client) -> Self {
+        self.http = http;
         self
     }
 
@@ -148,7 +182,7 @@ impl JobcelisClient {
 
     /// Get event details.
     pub async fn get_event(&self, event_id: &str) -> Result<Value, JobcelisError> {
-        self.get(&format!("/api/v1/events/{event_id}"), &[]).await
+        self.get(&format!("/api/v1/events/{}", enc(event_id)), &[]).await
     }
 
     /// List events with cursor pagination.
@@ -160,7 +194,7 @@ impl JobcelisClient {
 
     /// Delete an event.
     pub async fn delete_event(&self, event_id: &str) -> Result<(), JobcelisError> {
-        self.do_delete(&format!("/api/v1/events/{event_id}")).await
+        self.do_delete(&format!("/api/v1/events/{}", enc(event_id))).await
     }
 
     // -------------------------------------------------------------------------
@@ -197,7 +231,7 @@ impl JobcelisClient {
 
     /// Get webhook details.
     pub async fn get_webhook(&self, webhook_id: &str) -> Result<Value, JobcelisError> {
-        self.get(&format!("/api/v1/webhooks/{webhook_id}"), &[]).await
+        self.get(&format!("/api/v1/webhooks/{}", enc(webhook_id)), &[]).await
     }
 
     /// List webhooks.
@@ -217,17 +251,17 @@ impl JobcelisClient {
     /// })).await?;
     /// ```
     pub async fn update_webhook(&self, webhook_id: &str, data: Value) -> Result<Value, JobcelisError> {
-        self.patch(&format!("/api/v1/webhooks/{webhook_id}"), data).await
+        self.patch(&format!("/api/v1/webhooks/{}", enc(webhook_id)), data).await
     }
 
     /// Delete a webhook.
     pub async fn delete_webhook(&self, webhook_id: &str) -> Result<(), JobcelisError> {
-        self.do_delete(&format!("/api/v1/webhooks/{webhook_id}")).await
+        self.do_delete(&format!("/api/v1/webhooks/{}", enc(webhook_id))).await
     }
 
     /// Get health status for a webhook.
     pub async fn webhook_health(&self, webhook_id: &str) -> Result<Value, JobcelisError> {
-        self.get(&format!("/api/v1/webhooks/{webhook_id}/health"), &[]).await
+        self.get(&format!("/api/v1/webhooks/{}/health", enc(webhook_id)), &[]).await
     }
 
     /// List available webhook templates.
@@ -237,7 +271,7 @@ impl JobcelisClient {
 
     /// Send a test delivery to a webhook.
     pub async fn test_webhook(&self, webhook_id: &str) -> Result<Value, JobcelisError> {
-        self.post(&format!("/api/v1/webhooks/{webhook_id}/test"), json!({})).await
+        self.post(&format!("/api/v1/webhooks/{}/test", enc(webhook_id)), json!({})).await
     }
 
     // -------------------------------------------------------------------------
@@ -254,7 +288,7 @@ impl JobcelisClient {
 
     /// Retry a failed delivery.
     pub async fn retry_delivery(&self, delivery_id: &str) -> Result<Value, JobcelisError> {
-        self.post(&format!("/api/v1/deliveries/{delivery_id}/retry"), json!({})).await
+        self.post(&format!("/api/v1/deliveries/{}/retry", enc(delivery_id)), json!({})).await
     }
 
     // -------------------------------------------------------------------------
@@ -270,17 +304,17 @@ impl JobcelisClient {
 
     /// Get dead letter details.
     pub async fn get_dead_letter(&self, dead_letter_id: &str) -> Result<Value, JobcelisError> {
-        self.get(&format!("/api/v1/dead-letters/{dead_letter_id}"), &[]).await
+        self.get(&format!("/api/v1/dead-letters/{}", enc(dead_letter_id)), &[]).await
     }
 
     /// Retry a dead letter.
     pub async fn retry_dead_letter(&self, dead_letter_id: &str) -> Result<Value, JobcelisError> {
-        self.post(&format!("/api/v1/dead-letters/{dead_letter_id}/retry"), json!({})).await
+        self.post(&format!("/api/v1/dead-letters/{}/retry", enc(dead_letter_id)), json!({})).await
     }
 
     /// Mark a dead letter as resolved.
     pub async fn resolve_dead_letter(&self, dead_letter_id: &str) -> Result<Value, JobcelisError> {
-        self.patch(&format!("/api/v1/dead-letters/{dead_letter_id}/resolve"), json!({})).await
+        self.patch(&format!("/api/v1/dead-letters/{}/resolve", enc(dead_letter_id)), json!({})).await
     }
 
     // -------------------------------------------------------------------------
@@ -303,12 +337,12 @@ impl JobcelisClient {
 
     /// Get replay details.
     pub async fn get_replay(&self, replay_id: &str) -> Result<Value, JobcelisError> {
-        self.get(&format!("/api/v1/replays/{replay_id}"), &[]).await
+        self.get(&format!("/api/v1/replays/{}", enc(replay_id)), &[]).await
     }
 
     /// Cancel a replay.
     pub async fn cancel_replay(&self, replay_id: &str) -> Result<(), JobcelisError> {
-        self.do_delete(&format!("/api/v1/replays/{replay_id}")).await
+        self.do_delete(&format!("/api/v1/replays/{}", enc(replay_id))).await
     }
 
     // -------------------------------------------------------------------------
@@ -335,22 +369,22 @@ impl JobcelisClient {
 
     /// Get job details.
     pub async fn get_job(&self, job_id: &str) -> Result<Value, JobcelisError> {
-        self.get(&format!("/api/v1/jobs/{job_id}"), &[]).await
+        self.get(&format!("/api/v1/jobs/{}", enc(job_id)), &[]).await
     }
 
     /// Update a scheduled job.
     pub async fn update_job(&self, job_id: &str, data: Value) -> Result<Value, JobcelisError> {
-        self.patch(&format!("/api/v1/jobs/{job_id}"), data).await
+        self.patch(&format!("/api/v1/jobs/{}", enc(job_id)), data).await
     }
 
     /// Delete a scheduled job.
     pub async fn delete_job(&self, job_id: &str) -> Result<(), JobcelisError> {
-        self.do_delete(&format!("/api/v1/jobs/{job_id}")).await
+        self.do_delete(&format!("/api/v1/jobs/{}", enc(job_id))).await
     }
 
     /// List runs for a scheduled job.
     pub async fn list_job_runs(&self, job_id: &str, limit: u32) -> Result<Value, JobcelisError> {
-        self.get(&format!("/api/v1/jobs/{job_id}/runs"), &[("limit", limit.to_string())]).await
+        self.get(&format!("/api/v1/jobs/{}/runs", enc(job_id)), &[("limit", limit.to_string())]).await
     }
 
     /// Preview next occurrences for a cron expression.
@@ -362,9 +396,10 @@ impl JobcelisClient {
     // Pipelines
     // -------------------------------------------------------------------------
 
-    /// Create an event pipeline.
-    pub async fn create_pipeline(&self, name: &str, topics: Vec<&str>, steps: Vec<Value>) -> Result<Value, JobcelisError> {
-        self.post("/api/v1/pipelines", json!({"name": name, "topics": topics, "steps": steps})).await
+    /// Create an event pipeline that delivers to the webhook `webhook_id`
+    /// (required by the API).
+    pub async fn create_pipeline(&self, name: &str, webhook_id: &str, topics: Vec<&str>, steps: Vec<Value>) -> Result<Value, JobcelisError> {
+        self.post("/api/v1/pipelines", json!({"name": name, "webhook_id": webhook_id, "topics": topics, "steps": steps})).await
     }
 
     /// List pipelines.
@@ -376,22 +411,22 @@ impl JobcelisClient {
 
     /// Get pipeline details.
     pub async fn get_pipeline(&self, pipeline_id: &str) -> Result<Value, JobcelisError> {
-        self.get(&format!("/api/v1/pipelines/{pipeline_id}"), &[]).await
+        self.get(&format!("/api/v1/pipelines/{}", enc(pipeline_id)), &[]).await
     }
 
     /// Update a pipeline.
     pub async fn update_pipeline(&self, pipeline_id: &str, data: Value) -> Result<Value, JobcelisError> {
-        self.patch(&format!("/api/v1/pipelines/{pipeline_id}"), data).await
+        self.patch(&format!("/api/v1/pipelines/{}", enc(pipeline_id)), data).await
     }
 
     /// Delete a pipeline.
     pub async fn delete_pipeline(&self, pipeline_id: &str) -> Result<(), JobcelisError> {
-        self.do_delete(&format!("/api/v1/pipelines/{pipeline_id}")).await
+        self.do_delete(&format!("/api/v1/pipelines/{}", enc(pipeline_id))).await
     }
 
     /// Test a pipeline with a sample payload.
     pub async fn test_pipeline(&self, pipeline_id: &str, payload: Value) -> Result<Value, JobcelisError> {
-        self.post(&format!("/api/v1/pipelines/{pipeline_id}/test"), payload).await
+        self.post(&format!("/api/v1/pipelines/{}/test", enc(pipeline_id)), json!({"payload": payload})).await
     }
 
     // -------------------------------------------------------------------------
@@ -412,17 +447,17 @@ impl JobcelisClient {
 
     /// Get event schema details.
     pub async fn get_event_schema(&self, schema_id: &str) -> Result<Value, JobcelisError> {
-        self.get(&format!("/api/v1/event-schemas/{schema_id}"), &[]).await
+        self.get(&format!("/api/v1/event-schemas/{}", enc(schema_id)), &[]).await
     }
 
     /// Update an event schema.
     pub async fn update_event_schema(&self, schema_id: &str, data: Value) -> Result<Value, JobcelisError> {
-        self.patch(&format!("/api/v1/event-schemas/{schema_id}"), data).await
+        self.patch(&format!("/api/v1/event-schemas/{}", enc(schema_id)), data).await
     }
 
     /// Delete an event schema.
     pub async fn delete_event_schema(&self, schema_id: &str) -> Result<(), JobcelisError> {
-        self.do_delete(&format!("/api/v1/event-schemas/{schema_id}")).await
+        self.do_delete(&format!("/api/v1/event-schemas/{}", enc(schema_id))).await
     }
 
     /// Validate a payload against the schema for a topic.
@@ -450,12 +485,12 @@ impl JobcelisClient {
 
     /// Delete a sandbox endpoint.
     pub async fn delete_sandbox_endpoint(&self, endpoint_id: &str) -> Result<(), JobcelisError> {
-        self.do_delete(&format!("/api/v1/sandbox-endpoints/{endpoint_id}")).await
+        self.do_delete(&format!("/api/v1/sandbox-endpoints/{}", enc(endpoint_id))).await
     }
 
     /// List requests received by a sandbox endpoint.
     pub async fn list_sandbox_requests(&self, endpoint_id: &str, limit: u32) -> Result<Value, JobcelisError> {
-        self.get(&format!("/api/v1/sandbox-endpoints/{endpoint_id}/requests"), &[("limit", limit.to_string())]).await
+        self.get(&format!("/api/v1/sandbox-endpoints/{}/requests", enc(endpoint_id)), &[("limit", limit.to_string())]).await
     }
 
     // -------------------------------------------------------------------------
@@ -544,22 +579,22 @@ impl JobcelisClient {
 
     /// Get project by ID.
     pub async fn get_project_by_id(&self, project_id: &str) -> Result<Value, JobcelisError> {
-        self.get(&format!("/api/v1/projects/{project_id}"), &[]).await
+        self.get(&format!("/api/v1/projects/{}", enc(project_id)), &[]).await
     }
 
     /// Update a project by ID.
     pub async fn update_project_by_id(&self, project_id: &str, data: Value) -> Result<Value, JobcelisError> {
-        self.patch(&format!("/api/v1/projects/{project_id}"), data).await
+        self.patch(&format!("/api/v1/projects/{}", enc(project_id)), data).await
     }
 
     /// Delete a project.
     pub async fn delete_project(&self, project_id: &str) -> Result<(), JobcelisError> {
-        self.do_delete(&format!("/api/v1/projects/{project_id}")).await
+        self.do_delete(&format!("/api/v1/projects/{}", enc(project_id))).await
     }
 
     /// Set a project as the default.
     pub async fn set_default_project(&self, project_id: &str) -> Result<Value, JobcelisError> {
-        self.patch(&format!("/api/v1/projects/{project_id}/default"), json!({})).await
+        self.patch(&format!("/api/v1/projects/{}/default", enc(project_id)), json!({})).await
     }
 
     // -------------------------------------------------------------------------
@@ -568,23 +603,23 @@ impl JobcelisClient {
 
     /// List members of a project.
     pub async fn list_members(&self, project_id: &str) -> Result<Value, JobcelisError> {
-        self.get(&format!("/api/v1/projects/{project_id}/members"), &[]).await
+        self.get(&format!("/api/v1/projects/{}/members", enc(project_id)), &[]).await
     }
 
-    /// Add a member to a project.
+    /// Add a member to a project. The role defaults to `viewer`.
     pub async fn add_member(&self, project_id: &str, email: &str, role: Option<&str>) -> Result<Value, JobcelisError> {
-        let r = role.unwrap_or("member");
-        self.post(&format!("/api/v1/projects/{project_id}/members"), json!({"email": email, "role": r})).await
+        let r = role.unwrap_or("viewer");
+        self.post(&format!("/api/v1/projects/{}/members", enc(project_id)), json!({"email": email, "role": r})).await
     }
 
     /// Update a member's role.
     pub async fn update_member(&self, project_id: &str, member_id: &str, role: &str) -> Result<Value, JobcelisError> {
-        self.patch(&format!("/api/v1/projects/{project_id}/members/{member_id}"), json!({"role": role})).await
+        self.patch(&format!("/api/v1/projects/{}/members/{}", enc(project_id), enc(member_id)), json!({"role": role})).await
     }
 
     /// Remove a member from a project.
     pub async fn remove_member(&self, project_id: &str, member_id: &str) -> Result<(), JobcelisError> {
-        self.do_delete(&format!("/api/v1/projects/{project_id}/members/{member_id}")).await
+        self.do_delete(&format!("/api/v1/projects/{}/members/{}", enc(project_id), enc(member_id))).await
     }
 
     // -------------------------------------------------------------------------
@@ -598,12 +633,12 @@ impl JobcelisClient {
 
     /// Accept an invitation.
     pub async fn accept_invitation(&self, invitation_id: &str) -> Result<Value, JobcelisError> {
-        self.post(&format!("/api/v1/invitations/{invitation_id}/accept"), json!({})).await
+        self.post(&format!("/api/v1/invitations/{}/accept", enc(invitation_id)), json!({})).await
     }
 
     /// Reject an invitation.
     pub async fn reject_invitation(&self, invitation_id: &str) -> Result<Value, JobcelisError> {
-        self.post(&format!("/api/v1/invitations/{invitation_id}/reject"), json!({})).await
+        self.post(&format!("/api/v1/invitations/{}/reject", enc(invitation_id)), json!({})).await
     }
 
     // -------------------------------------------------------------------------
@@ -652,7 +687,7 @@ impl JobcelisClient {
 
     /// Accept consent for a specific purpose.
     pub async fn accept_consent(&self, purpose: &str) -> Result<Value, JobcelisError> {
-        self.post(&format!("/api/v1/me/consents/{purpose}/accept"), json!({})).await
+        self.post(&format!("/api/v1/me/consents/{}/accept", enc(purpose)), json!({})).await
     }
 
     /// Export all personal data (GDPR data portability).
@@ -660,9 +695,10 @@ impl JobcelisClient {
         self.get("/api/v1/me/data", &[]).await
     }
 
-    /// Request restriction of data processing.
-    pub async fn restrict_processing(&self) -> Result<Value, JobcelisError> {
-        self.post("/api/v1/me/restrict", json!({})).await
+    /// Request restriction of data processing. The API asks for the
+    /// account password to confirm it.
+    pub async fn restrict_processing(&self, password: &str) -> Result<Value, JobcelisError> {
+        self.post("/api/v1/me/restrict", json!({"password": password})).await
     }
 
     /// Lift restriction on data processing.
@@ -696,7 +732,7 @@ impl JobcelisClient {
 
     /// Revoke an embed token.
     pub async fn revoke_embed_token(&self, id: &str) -> Result<(), JobcelisError> {
-        self.do_delete(&format!("/api/v1/embed/tokens/{id}")).await
+        self.do_delete(&format!("/api/v1/embed/tokens/{}", enc(id))).await
     }
 
     // -------------------------------------------------------------------------
@@ -732,9 +768,10 @@ impl JobcelisClient {
         self.get("/api/v1/retention", &[]).await
     }
 
-    /// Update retention policy.
+    /// Update retention policy (`events_days`, `deliveries_days`,
+    /// `audit_logs_days`).
     pub async fn update_retention_policy(&self, policy: Value) -> Result<Value, JobcelisError> {
-        self.patch("/api/v1/retention", policy).await
+        self.patch("/api/v1/retention", json!({"retention_policy": policy})).await
     }
 
     /// Preview a purge operation.
@@ -756,9 +793,10 @@ impl JobcelisClient {
         self.get("/health", &[]).await
     }
 
-    /// Get platform status.
+    /// Get platform status. Same as [`health`](Self::health): `/status`
+    /// is the public HTML status page.
     pub async fn status(&self) -> Result<Value, JobcelisError> {
-        self.get("/status", &[]).await
+        self.get("/health", &[]).await
     }
 
     // =========================================================================
@@ -901,6 +939,19 @@ async fn send_once(req: RequestBuilder) -> Result<(u16, Option<String>, String),
         .map(str::to_string);
     let body = resp.text().await?;
     Ok((status, retry_after, body))
+}
+
+/// Percent-encodes a value interpolated into a URL path (everything but
+/// the RFC 3986 unreserved characters).
+fn enc(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => out.push(byte as char),
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
 }
 
 fn parse_response(status: u16, body: String) -> Result<Value, JobcelisError> {

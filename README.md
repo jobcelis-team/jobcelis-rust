@@ -37,6 +37,12 @@ async fn main() -> Result<(), jobcelis::JobcelisError> {
 > let client = JobcelisClient::with_base_url("your_api_key", "https://your-instance.example.com");
 > ```
 
+> **Timeouts:** requests time out after 30 seconds (10 seconds to connect). To change that, or to add a proxy, pass your own `reqwest::Client`:
+> ```rust
+> let http = reqwest::Client::builder().timeout(std::time::Duration::from_secs(60)).build().unwrap();
+> let client = JobcelisClient::new("your_api_key").with_http_client(http);
+> ```
+
 ## Authentication
 
 The auth methods do not require an API key. Use them to register, log in, and manage JWT tokens.
@@ -166,7 +172,8 @@ let preview = client.cron_preview("0 9 * * *", 10).await?;
 ## Pipelines
 
 ```rust
-let pipeline = client.create_pipeline("order-processing",
+// The pipeline delivers to an existing webhook
+let pipeline = client.create_pipeline("order-processing", "wh_abc123",
     vec!["order.created"],
     vec![
         json!({"type": "filter", "config": {"field": "amount", "gt": 100}}),
@@ -180,8 +187,7 @@ client.update_pipeline("pipe_abc123", json!({"name": "order-processing-v2"})).aw
 client.delete_pipeline("pipe_abc123").await?;
 
 // Test a pipeline with a sample payload
-let result = client.test_pipeline("pipe_abc123",
-    json!({"topic": "order.created", "payload": {"id": "1"}})).await?;
+let result = client.test_pipeline("pipe_abc123", json!({"id": "1", "amount": 150})).await?;
 ```
 
 ## Event Schemas
@@ -287,7 +293,8 @@ client.export_audit_log("csv").await?;
 let consents = client.get_consents().await?;
 client.accept_consent("marketing").await?;
 let my_data = client.export_my_data().await?;
-client.restrict_processing().await?;
+// The account password confirms the request
+client.restrict_processing("your-password").await?;
 client.lift_restriction().await?;
 client.object_to_processing().await?;
 client.restore_consent().await?;
@@ -297,7 +304,7 @@ client.restore_consent().await?;
 
 ```rust
 let health = client.health().await?;
-let status = client.status().await?;
+let status = client.status().await?; // same as health()
 ```
 
 ## Error Handling
